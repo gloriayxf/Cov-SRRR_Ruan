@@ -9,11 +9,14 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
+
+## A1. Main function
 ```{r}
 library(rrpack)
 library(glasso)
 library(CVXR)
 #----------------------------- Main function ------------------------------
+
 Algorithm_1 = function(Y,X,l1,l2,r,max_iter=1000,max_best=5,
 gl_method="glassoCVXR",srrr_method="srrrCVXR",
 verbose=FALSE){
@@ -166,12 +169,14 @@ do_cv = function(params,Y,X,num_folds){
 l1 = params[1]
 l2 = params[2]
 if(length(params)==3){
-r = params[3]
-}else{
-r = 1 #set default for r=1
-}
+  r = params[3]
+  }
+else{
+  r = 1 #set default for r=1
+  }
 fold_size = nrow(Y)/num_folds
 fold_err = numeric(length = num_folds)
+
 for(k in 1:num_folds){
 Y_in = Y[-c(((k-1)*fold_size+1):(k*fold_size)),]
 X_in = X[-c(((k-1)*fold_size+1):(k*fold_size)),]
