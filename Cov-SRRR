@@ -1,0 +1,254 @@
+---
+title: "Cov-SRRR_Ruan"
+author: "Gloria"
+date: "07/09/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(rrpack)
+library(glasso)
+library(CVXR)
+#----------------------------- Main function ------------------------------
+Algorithm_1 = function(Y,X,l1,l2,r,max_iter=1000,max_best=5,
+gl_method="glassoCVXR",srrr_method="srrrCVXR",
+verbose=FALSE){
+#--------------------------------------------------------------
+# Initialize A, B, O, and variables used to monitor convergence:
+# - Initialize O as a diagonal matrix of inverse variances
+Yvariances <- apply(Y,2,var); O = diag(1/Yvariances)
+# - Initialize A and B as a SRRR assuming independent errors using the
+# srrr() function from the package rrpack.
+ab <- rrpack::srrr(Y,X,nrank=r,modstr=list(lamA=l2))#returns SVD of C=BA^T
+A <- ab$V; B <- ab$U %*% ab$D
+# - Initialize convergence criterion values to arbitrary large numbers
+obj_best <- obj_val <- obj_diff <- 1e10
+# - Initialize iteration counters to 1
+itera <- 1 # main iteration counter
+iterb <- 1 # number of iterations with current best value of obj. func.
+#--------------------------------------------------------------
+# While not converged, iterate between estimation
+# of O by GLASSO and (A,B) by SRRR.
+while(obj_diff>0.001 && itera < max_iter && iterb < max_best){
+# 1. GLASSO to estimate O for fixed A,B.
+Sigma_R = crossprod(Y-X %*% B %*% t(A))/nrow(Y)
+O = GLASSO(Sigma_R,l1,gl_method=gl_method)
+# 2. SRRR on Ytilde=Y O^{1/2} and X to estimate Atilde and B
+Ytilde <- Y %*% chol(O)
+ss <- SRRR(Ytilde,X,r,l2,max_iter,max_best,srrr_method,B)
+B <- ss$B
+A <- solve(chol(O)) %*% ss$A # Atilde=O^{1/2}A, so A=O^{-1/2}Atilde
+#check whether objective function has converged
+obj_newval = obj_fun_4(Y,X,A,B,O,l1,l2)
+obj_diff = abs(obj_val - obj_newval)
+obj_val = obj_newval
+if(verbose) {cat("iteration ",itera, " objective func. ",obj_val,"\n")}
+# Check whether objective function has improved
+if(itera > 1 & obj_val < obj_best) {
+obj_best <- obj_val
+iter_best <- itera
+O_best <- O; B_best <- B; A_best <- A
+iterb <- 1
+} else {
+iterb <- iterb + 1
+}
+itera = itera+1
+}
+if(itera==max_iter)
+warning("did not converge after",max_iter,"iterations\n")
+return(list(A = A_best,B = B_best,O = O_best,iter=itera, obj=obj_best))
+}
+#------------------------------ Likelihood -------------------------------
+# Objective function 4 (the negative of the penalized log-likelihood)
+# from Chen and Huang (2016). This function appears in (Halani, 2016)
+# and is used to monitor convergence.
+
+obj_fun_4 = function(Y,X,A,B,O,l1,l2){
+n = nrow(Y)
+Sigma_R = crossprod(Y-X %*% B %*% t(A))/nrow(Y)
+t1 <- sum(diag(Sigma_R %*% O))
+t2 <- -det(O, logarithm=TRUE)
+t3 <- l1*sum(abs(O[row(O)!=col(O)]))
+t4 <- l2*sum(sqrt(rowSums(B^2)))
+return(t1+t2+t3+t4)
+}
+#------------------------------ GLASSO -------------------------------
+# Wrapper to call the GLASSO algorithm specified by the argument
+# gl_method.
+GLASSO <- function(Sigma_R,l1,gl_method="glassoCVXR"){
+if(gl_method=="glassoCVXR") {
+out <- as.matrix(glassoCVXR(Sigma_R,l1))
+} else if (gl_method=="glasso::glasso") {
+out <- glasso::glasso(Sigma_R,l1,penalize.diagonal=FALSE)$wi
+} else {
+stop(paste("GLASSO algorithm",gl_method,"not implemented."))
+}
+out
+}
+# Implementation of GLASSO using tools from CVXR and the function
+# glassoCVXR is written based on codes in Fu et al. (2017).
+# Note: The penalty term includes the diagonal matrix diag(O) whose
+# diagonal elements are those of O. In R, you need to call diag twice
+# to get such a matrix, once to extract the vector of diagonal terms
+# from O and a second time to make a diagonal matrix out of this vector.
+glassoCVXR <- function(S,l1) {
+p <- nrow(S)
+O <- Semidef(p) # Semidefinite p*p precision matrix to optimize over
+obj <- matrix_trace(S %*% O) - log_det(O) + l1*p_norm(O-diag(diag(O)),p=1)
+prob <- Problem(Minimize(obj)) # define problem
+result <- solve(prob) # solve problem
+result$getValue(O)
+}
+#-------------------------------- SRRR ---------------------------------
+# Wrapper function to call the SRRR algorithm specified by the argument
+# srrr_method.
+SRRR <- function(Y,X,r,l2,max_iter,max_best,srrr_method,B) {
+if(srrr_method=="srrrCVXR") {
+out <- srrrCVXR(Y,X,r,l2,max_iter,max_best,B)
+}
+else if(srrr_method=="rrpack::srrr") {
+modstr <- list(lamA=l2)
+control <- list(maxit=max_iter)
+tem <- rrpack::srrr(Y,X,nrank=r,A0=B,
+modstr=modstr,control=control)
+# srrr returns an SVD of C=BA^T, from which A=V and B=UD
+out <- list(A=tem$V,B = tem$U %*% tem$D)
+} else {
+stop("SRRR method",srrr_method,"not implemented.")
+}
+out
+}
+
+# Implementation of SRRR using tools from CVXR
+srrrCVXR <- function (Y,X,r,l2,max_iter,max_best,B){
+itera <- iterb <- 1
+obj_val <- 1e10; obj_best <- 1e10
+obj_diff <- 10000
+while(abs(obj_diff)>0.001 && itera<max_iter && iterb < max_best){
+# 1. Update A for fixed B
+svd_results = svd(t(Y) %*% X %*% B,nu=r,nv=r)
+A = svd_results$u %*% t(svd_results$v)
+# 2. Update B for fixed A using the optimizer
+# from the CVXR package
+n <- nrow(Y); p <- ncol(X)
+BB <- Variable(rows=p,cols=r) # Variable to optimize over
+obj <- sum((Y - X %*% BB %*% t(A))^2)/n +
+l2*sum(p_norm(BB,p=2,axis=1)) # SRRR objective function
+prob <- Problem(Minimize(obj)) # define problem
+result <- solve(prob) # solve problem
+B <- matrix(result$getValue(BB),
+ncol=r,nrow=p) # extract solution
+#check whether objective function has converged
+obj_newval = result$value
+obj_diff = (obj_val - obj_newval)
+obj_val = obj_newval
+# Check for improvement, if itera > 1
+if(itera > 1 & obj_val < obj_best) {
+obj_best <- obj_val
+iter_best <- itera
+B_best <- B; A_best <- A
+iterb <- 1
+} else {
+iterb <- iterb + 1
+}
+itera = itera+1
+}
+return(list(A=A_best,B=B_best))
+}
+#------------------------- Cross-validation -------------
+-------------
+# The do_cv() function appears in (Halani, 2016).
+do_cv = function(params,Y,X,num_folds){
+l1 = params[1]
+l2 = params[2]
+if(length(params)==3){
+r = params[3]
+}else{
+r = 1 #set default for r=1
+}
+fold_size = nrow(Y)/num_folds
+fold_err = numeric(length = num_folds)
+for(k in 1:num_folds){
+Y_in = Y[-c(((k-1)*fold_size+1):(k*fold_size)),]
+X_in = X[-c(((k-1)*fold_size+1):(k*fold_size)),]
+Y_out = Y[c(((k-1)*fold_size+1):(k*fold_size)),]
+X_out = X[c(((k-1)*fold_size+1):(k*fold_size)),]
+res = Algorithm_1(Y_in,X_in,l1,l2,r)
+fold_err[k] = pred_err(Y_out,X_out,res$A,res$B)
+#defined pred_err( ) below as mse
+}
+mean_err = mean(fold_err)
+# print(paste("MSE:",mean_MSE))
+return(mean_err)
+}
+pred_err = function(Y_out, X_out, A, B){
+Yhat = X_out %*% B %*% t(A)
+mse = sum( (Y_out - Yhat)^2) /(length(Yhat))
+return(mse)
+}
+
+
+```
+
+
+## A.2 Cross-validation (rank=1, stage-one search)
+```{r}
+load("mydat.RData")
+# Setup
+lam1 <- c(10^-3, 10^-2, 10^-1, 0.5, 1, 5, 10, 50, 10^2, 10^3)
+lam1 <- as.list(lam1) # as a list for the call to mclapply
+names(lam1) <- lam1 # Name the list elements.
+# The list output by mclapply will have the same names.
+lam2 <- c(10^-3, 10^-2, 10^-1, 0.5, 1, 5, 10, 50, 10^2, 10^3)
+do_cv_lam1 <- function(lam1) {
+# A function to do inner loop for given lam1.
+# Variables like lam2, Ymat and Xmat will be obtained
+# from the user workspace
+nl2 <- length(lam2)
+TIME <- rep(NA,nl2) # to hold run times
+Errors <- rep(NA,nl2) # to hold estimated MSPE predictions
+for(i in 1:nl2){
+# In case the fitting in the CV fails, wrap call to do_cv() in try()
+start_time <- Sys.time()
+tem <- try(do_cv(c(lam1,lam2[i]),
+Ymat, Xmat, num_folds=5))
+end_time <- Sys.time()
+TIME[i] <- end_time - start_time
+Errors[i]=ifelse(class(tem)=="try-error",NA,tem)
+}
+return(cbind(lam2,Errors,TIME))
+}
+library(parallel)
+cv_res <- mclapply(lam1,do_cv_lam1)
+# save the cv_res object to a .RData file.
+save(cv_res, file="r1_stage1.RData")
+```
+
+## A.3 Bootstrap (rank=1)
+```{r}
+load("mydat.RData")
+set.seed(123)
+Nboot <- 100
+n <- nrow(Xmat)
+bootSamples <- vector(mode="list",length=Nboot)
+# Now fill the list with vectors giving the index of the bootstrap-sampled
+individuals
+for(i in 1:Nboot) { bootSamples[[i]] <- sample.int(n,replace=TRUE) }
+run_bootstrap <- function(bootsam){
+Xboo <- Xmat[bootsam, ] #Xmat & Ymat are loaded
+Yboo <- Ymat[bootsam, ]
+res <- Algorithm_1(Y=Yboo, X=Xboo,
+l1=1, l2=2.5, r=1) # Algorithm_1 is loaded
+VIP1 <- ifelse(round(res$B[,1],4)==0, yes=0, no=1)
+return(list(LF1.VIP=VIP1))
+}
+library(parallel)
+boot_res <- mclapply(bootSamples,run_bootstrap, mc.cores = 10)
+save(boot_res, file="r1_bootstrap.RData")
+
+```
+
