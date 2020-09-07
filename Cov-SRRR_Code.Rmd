@@ -1,5 +1,5 @@
 ---
-title: "Cov-SRRR_Ruan"
+title: "Cov-SRRR_code"
 author: "Gloria"
 date: "07/09/2020"
 output: html_document
@@ -196,6 +196,7 @@ return(mse)
 
 
 ## A.2 Cross-validation (rank=1, stage-one search)
+
 ```{r}
 load("mydat.RData")
 # Setup
@@ -249,6 +250,8 @@ return(list(LF1.VIP=VIP1))
 library(parallel)
 boot_res <- mclapply(bootSamples,run_bootstrap, mc.cores = 10)
 save(boot_res, file="r1_bootstrap.RData")
+
+```
 
 ```
 
